@@ -46,6 +46,9 @@ input[type=number],select{font:inherit;padding:9px 10px;border:1px solid var(--l
 .check .sw:checked{background:var(--a)}
 .check .sw:checked::after{transform:translateX(18px)}
 .check .sw:disabled{opacity:.5;cursor:not-allowed}
+.prev{margin-top:12px;border-top:1px solid var(--line);padding-top:10px}
+.prev textarea{display:block;width:100%;min-height:96px;margin-top:6px;padding:9px 10px;font:inherit;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);resize:vertical}
+.prev .row{margin-top:8px}
 .btn[data-arm]{border-color:var(--err);color:var(--err);font-weight:600}
 .how summary{font-size:15px}
 .how p{margin:12px 0 4px;font-weight:600;color:var(--a)}
@@ -129,9 +132,11 @@ João Pereira
 Ana Souza</pre>
     <p>Bom saber</p>
     <ul>
-      <li>Os nomes não saem do seu navegador. Para lembrar quem já foi sorteado, o site guarda só posições numéricas da lista, em cookie de sessão.</li>
-      <li>Se a página for recarregada, envie o mesmo CSV de novo: o site reconhece a lista e continua de onde parou.</li>
-      <li>"Limpar sorteados" zera essa memória e todos voltam a concorrer.</li>
+      <li>Os nomes não saem do seu navegador e nunca ficam salvos em texto. Para lembrar quem já foi sorteado, o site guarda um código curto de cada sorteado, por 30 dias.</li>
+      <li>Essa memória vale para este navegador, neste aparelho. Em outro computador, em aba anônima ou depois de limpar os dados do navegador, ela começa vazia.</li>
+      <li>Ao abrir o site de novo, envie o CSV: ele reconhece quem já foi sorteado, mesmo que a lista tenha ganhado ou perdido nomes.</li>
+      <li>Já sorteou alguém antes, sem usar o site? Abra "Já sorteados antes?", cole os nomes (um por linha) e eles ficam fora do sorteio.</li>
+      <li>"Limpar sorteados" apaga essa memória e todos voltam a concorrer.</li>
     </ul>
   </details>
 
@@ -161,6 +166,14 @@ Ana Souza</pre>
       </div>
       <p class="msg" id="msg-num" role="status"></p>
     </div>
+
+    <details class="prev" id="prev">
+      <summary>Já sorteados antes? Excluir do sorteio</summary>
+      <p class="msg" id="prev-hint"></p>
+      <textarea id="prev-txt" maxlength="200000" spellcheck="false" aria-label="Já sorteados"></textarea>
+      <div class="row"><button type="button" class="btn" id="prev-go">Excluir do sorteio</button></div>
+      <p class="msg" id="prev-msg" role="status"></p>
+    </details>
 
     <div class="checks">
       <label class="check"><input type="checkbox" class="sw" id="cnt" checked> Contagem 3, 2, 1 antes do resultado</label>
@@ -220,7 +233,8 @@ const el = {
   min:$('#min'), max:$('#max'), msgNum:$('#msg-num'), rep:$('#rep'), snd:$('#snd'), status:$('#status'),
   stage:$('#stage'), cv:$('#cv'), idleMsg:$('#idle-msg'), num:$('#num'), cnt:$('#cnt'), fillC:$('#fill-c'), fillS:$('#fill-s'),
   slot:$('#slot'), win:$('#win'), go:$('#go'), clear:$('#clear'), again:$('#again'), close:$('#close'),
-  hist:$('#hist'), histTitle:$('#hist-title')
+  hist:$('#hist'), histTitle:$('#hist-title'),
+  prevHint:$('#prev-hint'), prevTxt:$('#prev-txt'), prevGo:$('#prev-go'), prevMsg:$('#prev-msg')
 };
 const MAX_FILE = 5 * 1024 * 1024, MAX_NUMS = 100000, COOKIE = 'cv_sorteio';
 const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -334,6 +348,8 @@ function buildNames() {
   names = rows.slice(s).map(r => limpa(r[c])).filter(Boolean);
   setMsg(el.msg, names.length ? '' : 'Nenhum nome encontrado nessa coluna.', !names.length);
   init();
+  const u = usedSet().size;
+  if (u) setMsg(el.msg, u + ' nome(s) já sorteado(s) de antes foram reconhecidos nesta lista.');
 }
 
 /* ---------- lista / números ---------- */
@@ -350,43 +366,60 @@ const total = () => mode === 'nomes' ? names.length : (rng ? rng.mx - rng.mn + 1
 const label = i => mode === 'nomes' ? names[i] : String(rng.mn + i);
 function setMsg(n, t, err) { n.textContent = t; n.classList.toggle('erro', !!err); }
 
-/* ---------- memória da sessão (só posições, nunca nomes) ---------- */
-function fnv(str) {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+/* ---------- memória persistente (nunca guarda nomes, só códigos curtos) ---------- */
+const MEM_DIAS = 30;
+function h32(s, seed) {
+  let h = seed >>> 0;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
   return h.toString(36);
 }
+let keys = [], kmap = new Map();   // chave estável de cada nome da lista atual
+function nameKey(n, seen) {
+  const s = n.normalize('NFC').toLowerCase();
+  const b = h32(s, 0x811c9dc5) + h32(s.split('').reverse().join(''), 0x9747b28c);
+  const c = seen.get(b) || 0; seen.set(b, c + 1);
+  return b + '.' + c;            // repetidos na lista contam como pessoas diferentes
+}
+function buildKeys() {
+  const seen = new Map();
+  keys = names.map(n => nameKey(n, seen));
+  kmap = new Map(keys.map((k, i) => [k, i]));
+}
+const keyOf = i => mode === 'nomes' ? keys[i] : String(rng.mn + i);
+function idxOf(k) {
+  if (mode === 'nomes') return kmap.get(k);
+  const n = Number(k);
+  return rng && Number.isInteger(n) && n >= rng.mn && n <= rng.mx ? n - rng.mn : undefined;
+}
+function usedSet() { const u = new Set(); hist.forEach(k => { const i = idxOf(k); if (i !== undefined) u.add(i); }); return u; }
+const memName = () => mode === 'nomes' ? 'n' : 'm';
 function persist() {
-  if (!fp) return;
-  const val = hist.map(i => i.toString(36)).join('.');
-  try { sessionStorage.setItem('cv:' + fp, val); } catch (e) {}
+  const val = hist.join('~'), nm = memName();
+  try { localStorage.setItem('cv:' + nm, val); } catch (e) {}
   if (val.length < 3000) {
     const sec = location.protocol === 'https:' ? '; Secure' : '';
-    try { document.cookie = COOKIE + '=' + fp + '~' + val + '; path=/; SameSite=Strict' + sec; } catch (e) {}
+    try { document.cookie = 'cv_' + nm + '=' + val + '; path=/; max-age=' + MEM_DIAS * 86400 + '; SameSite=Strict' + sec; } catch (e) {}
   }
 }
-function restore() {
-  let val = null;
-  if (fp) {
-    try { val = sessionStorage.getItem('cv:' + fp); } catch (e) {}
-    if (val === null) {
-      const m = document.cookie.split('; ').find(c => c.startsWith(COOKIE + '='));
-      if (m) { const v = m.slice(COOKIE.length + 1), k = v.indexOf('~'); if (k > 0 && v.slice(0, k) === fp) val = v.slice(k + 1); }
-    }
+function load() {
+  let val = null; const nm = memName();
+  try { val = localStorage.getItem('cv:' + nm); } catch (e) {}
+  if (val === null) {
+    const m = document.cookie.split('; ').find(c => c.startsWith('cv_' + nm + '='));
+    if (m) val = m.slice(('cv_' + nm + '=').length);
   }
-  const t = total();
-  hist = val ? val.split('.').filter(Boolean).map(s => parseInt(s, 36)).filter(n => Number.isInteger(n) && n >= 0 && n < t) : [];
+  hist = val ? val.split('~').filter(k => /^[\w.\-]{1,40}$/.test(k)) : [];
 }
 
 /* ---------- estado e tela ---------- */
 function init() {
-  if (mode === 'nomes') fp = names.length ? 'c' + fnv(names.join('\n')) + '-' + names.length.toString(36) : '';
-  else { readRange(); fp = rng ? 'n' + rng.mn + '_' + rng.mx : ''; }
-  restore(); setState('idle'); render();
+  updatePrev();
+  if (mode === 'nomes') buildKeys(); else readRange();
+  load(); setState('idle'); render();
 }
-function avail() { const t = total(); return el.rep.checked ? t : t - new Set(hist).size; }
+function avail() { const t = total(); return el.rep.checked ? t : t - usedSet().size; }
 function render() {
-  const t = total(), used = new Set(hist).size, a = avail();
+  const t = total(), used = usedSet().size, a = avail();
   el.status.textContent = t
     ? t.toLocaleString('pt-BR') + (mode === 'nomes' ? ' participantes' : ' números') + ' · ' + used.toLocaleString('pt-BR') + ' já sorteados · ' + a.toLocaleString('pt-BR') + ' disponíveis'
     : (mode === 'nomes' ? 'Nenhuma lista carregada.' : 'Defina o intervalo de números.');
@@ -395,11 +428,12 @@ function render() {
   el.go.disabled = busy || a <= 0;
   el.again.disabled = busy || a <= 0;
   el.clear.disabled = busy || !hist.length;
-  [el.file, el.tabN, el.tabM, el.cnt, el.rep, el.snd, el.min, el.max, el.col, el.hdr].forEach(x => x.disabled = busy);
+  [el.file, el.prevTxt, el.prevGo, el.tabN, el.tabM, el.cnt, el.rep, el.snd, el.min, el.max, el.col, el.hdr].forEach(x => x.disabled = busy);
   if (!hist.length) disarm();
   el.stage.classList.toggle('busy', busy);
-  el.histTitle.textContent = 'Sorteados nesta sessão (' + hist.length + ')';
-  el.hist.replaceChildren(...hist.slice().reverse().map(i => { const li = document.createElement('li'); li.textContent = label(i); return li; }));
+  const shown = hist.map(k => idxOf(k)).filter(i => i !== undefined);
+  el.histTitle.textContent = 'Já sorteados (' + shown.length + ')';
+  el.hist.replaceChildren(...shown.reverse().map(i => { const li = document.createElement('li'); li.textContent = label(i); return li; }));
 }
 function setState(s) { el.stage.dataset.state = s; }
 function setMode(m) {
@@ -434,7 +468,7 @@ function pick() {
   const t = total();
   if (!t) return -1;
   if (el.rep.checked) return rnd(t);
-  const used = new Set(hist), c = [];
+  const used = usedSet(), c = [];
   for (let i = 0; i < t; i++) if (!used.has(i)) c.push(i);
   return c.length ? c[rnd(c.length)] : -1;
 }
@@ -475,7 +509,7 @@ async function sortear() {
     await shuffle(withCount);
     setState('reveal');
     el.win.textContent = label(idx); restart(el.win);
-    hist.push(idx); persist();
+    hist.push(keyOf(idx)); persist();
     finale(); confetti();
   } finally { busy = false; render(); }
 }
@@ -515,6 +549,57 @@ el.rep.addEventListener('change', render);
 el.go.addEventListener('click', sortear);
 el.again.addEventListener('click', sortear);
 el.close.addEventListener('click', closeFull);
+/* ---------- marcar já sorteados (colar nomes ou números) ---------- */
+const loose = s => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+function updatePrev() {
+  el.prevHint.textContent = mode === 'nomes'
+    ? 'Envie o CSV primeiro e cole aqui os nomes de quem já foi sorteado, um por linha. Maiúsculas e acentos não importam.'
+    : 'Cole os números já sorteados, separados por linha, espaço ou vírgula.';
+}
+function marcar() {
+  if (busy) return;
+  const known = new Set(hist), used = usedSet(), miss = [];
+  let added = 0, already = 0, note = '';
+  if (mode === 'nomes') {
+    const lines = el.prevTxt.value.split(/\r?\n/).map(limpa).filter(Boolean).slice(0, 5000);
+    if (!lines.length) return setMsg(el.prevMsg, 'Cole pelo menos um nome.', true);
+    const loaded = names.length > 0, seen = new Map(), by = new Map();
+    names.forEach((n, i) => { const k = loose(n); if (!by.has(k)) by.set(k, []); by.get(k).push(i); });
+    for (const raw of lines) {
+      if (loaded) {
+        const arr = by.get(loose(raw));
+        if (!arr) { miss.push(raw); continue; }
+        const i = arr.find(j => !used.has(j));
+        if (i === undefined) { already++; continue; }
+        used.add(i); hist.push(keys[i]); added++;
+      } else {
+        const k = nameKey(raw, seen);
+        if (known.has(k)) { already++; continue; }
+        known.add(k); hist.push(k); added++;
+      }
+    }
+    if (!loaded) note = ' A lista ainda não foi enviada: eles ficam marcados e serão reconhecidos quando você enviar o CSV (aqui os acentos precisam ser iguais aos do CSV).';
+    el.prevTxt.value = miss.join('\n');
+  } else {
+    if (!rng) return setMsg(el.prevMsg, 'Defina o intervalo de números antes.', true);
+    const nums = (el.prevTxt.value.match(/-?\d+/g) || []).slice(0, 100000).map(Number);
+    if (!nums.length) return setMsg(el.prevMsg, 'Cole pelo menos um número.', true);
+    for (const n of nums) {
+      if (!Number.isInteger(n) || n < rng.mn || n > rng.mx) { miss.push(n); continue; }
+      const k = String(n);
+      if (known.has(k)) { already++; continue; }
+      known.add(k); hist.push(k); added++;
+    }
+    el.prevTxt.value = miss.join('\n');
+  }
+  persist(); render();
+  let m = added + ' marcado(s) como já sorteado(s).';
+  if (already) m += ' ' + already + ' já estava(m) marcado(s).';
+  if (miss.length) m += ' Não encontrado(s) na ' + (mode === 'nomes' ? 'lista' : 'faixa de números') + ' (' + miss.length + '): ' + miss.slice(0, 8).join('; ') + (miss.length > 8 ? '…' : '') + '. Eles continuam na caixa para você conferir.';
+  setMsg(el.prevMsg, m + note, !!miss.length && !added);
+}
+el.prevGo.addEventListener('click', marcar);
+
 let clearTimer = null;
 function disarm() { clearTimeout(clearTimer); delete el.clear.dataset.arm; el.clear.textContent = 'Limpar sorteados'; }
 el.clear.addEventListener('click', () => {
